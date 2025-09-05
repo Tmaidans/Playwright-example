@@ -1,0 +1,110 @@
+//! Validate kai answer with AI
+export async function validateKaiAnswerWithAI(
+  question: string,
+  rawAnswer: string,
+  uiTable: UIRecord[],
+  certHeader: string
+): Promise<ValidationResult> {
+  //Prompt: give the table, question, and answer, and ask for True/False + reason
+  const prompt = `
+You are a QA assistant. You will be given:
+1) A question string.
+2) An answer string.
+3) A table of device records as JSON.
+4) A header string.
+
+when it comes to Status column, you can treat "false", "off", "no", "inactive", "disabled" answer as the same, and "true", "on", "yes", "active", "enabled" as the same also no matter what the context is. For example, "off" and "false" are the same, and "on" and "true" are the same.
+You can also use header string to help you understand the table. To determine status of a category, look at the "Status "column and Header string. If the header string says "FileVault" and table has "Status" 
+column with "On" or "Off" values, then you can base your answer on that column, especially if answer mentions Status field.
+
+When Kai answers that status is True, it means that the Status field of that device is on.
+When Kai answers that status is False, it means that the Status field of that device is off.
+
+Your task: Consider the question and compare the answer against the table and decide if the answer is accurate. 
+• If the answer correctly reflects the table data in full, reply with exactly:
+ True <brief explanation of what's right>
+
+• If the answer includes wrong devices, or misstates any value, or general logic is wrong, reply with:
+ False: <brief explanation of what's wrong. For example, if Kai answer for device capacity is 100GB, but UI table has 200GB, you can say "Kai answer is wrong because it says device capacity is 100GB, but UI table shows it is 200GB.">
+
+• Do not be too strict about the provided answer. It can be a bit vague or incomplete, but it should not be wrong.
+
+• If data is missing from the Kai anser, but UI table has it and the answer is correct based on question, you can say the answer is right but incomplete:
+  Incomplete <brief explanation of what's missing fron Kai answer compared to UI table. For exampple if UI table has more devices than Kai answer, you can say "Kai answer is incomplete because it does not show all devices.">
+
+• The source of truh for all asnwers has to be the UI table. Data from Kai answer has to be compared to the UI table and has to match it for the answer to be correct.
+
+The data from UI table has to match the data from Kai answer exactly. Not close to it.
+
+Do NOT output anything else.
+
+
+Table:
+${JSON.stringify(uiTable, null, 2)}
+
+
+Question:
+${question}
+
+
+Answer:
+${rawAnswer}
+
+Header:
+${certHeader}
+
+`.trim();
+
+  //Call OpenAI
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content: "You are a precise JSON-free QA assistant.",
+        },
+        { role: "user", content: prompt },
+      ],
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`OpenAI error: ${(await res.text()).substring(0, 200)}`);
+  }
+
+  const data = (await res.json()) as {
+    choices: Array<{ message: { content: string } }>;
+  };
+  const reply = data.choices[0].message.content.trim();
+
+  //Parse the AI's single-line reply
+  if (reply.toLowerCase().startsWith("true")) {
+    // strip "True" and any leading colon/spaces
+    const reason = reply.slice(4).replace(/^[:\s]+/, "");
+    return { isAccurate: true, reason: reason || undefined };
+  }
+
+  if (reply.toLowerCase().startsWith("false:")) {
+    return {
+      isAccurate: false,
+      reason: reply.slice(6).trim(),
+    };
+  }
+
+  if (reply.toLowerCase().startsWith("incomplete")) {
+    const reason = reply.slice(10).replace(/^[:\s]+/, "");
+    return { isAccurate: true, reason: `Incomplete: ${reason}` };
+  }
+
+  //Fallback if format is unexpected
+  return {
+    isAccurate: false,
+    reason: `Unexpected AI response: "${reply.substring(0, 100)}"`,
+  };
+}
